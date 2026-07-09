@@ -4,15 +4,13 @@
 #include <numeric>
 #include <sstream>
 
-using namespace std;
-
 namespace tensednet {
     
-    static int64_t numel_from_shape(const vector<int64_t>& shape) {
+    static int64_t numel_from_shape(const std::vector<int64_t>& shape) {
         if (shape.empty()) return 1; // scalar 
         int64_t numel = 1;
         for (auto dim : shape) {
-            if (dim <= 0) throw invalid_argument("Shape dimensions must be positive.");
+            if (dim <= 0) throw std::invalid_argument("Shape dimensions must be positive.");
             numel *= dim;
         }
         return numel;
@@ -20,29 +18,29 @@ namespace tensednet {
 
     // Constructor
     
-    Tensor::Tensor(vector<float> data, vector<int64_t> shape, bool requires_grad) 
-        : data(move(data)), shape(move(shape)), requires_grad(requires_grad) {
+    Tensor::Tensor(std::vector<float> data, std::vector<int64_t> shape, bool requires_grad) 
+        : data(std::move(data)), shape(std::move(shape)), requires_grad(requires_grad) {
         int64_t expected_numel = numel_from_shape(this->shape);
         if (this->data.size() != expected_numel) {
-            throw invalid_argument("Data size does not match shape. Expected " + to_string(expected_numel) + " elements, got " + to_string(this->data.size()));
+            throw std::invalid_argument("Data size does not match shape. Expected " + std::to_string(expected_numel) + " elements, got " + std::to_string(this->data.size()));
         }
     }
 
-    Tensor Tensor::zeros(const vector<int64_t>& shape, bool requires_grad) {
+    Tensor Tensor::zeros(const std::vector<int64_t>& shape, bool requires_grad) {
         int64_t numel = numel_from_shape(shape);
-        return Tensor(vector<float>(numel, 0.0f), shape, requires_grad);
+        return Tensor(std::vector<float>(numel, 0.0f), shape, requires_grad);
     }
-    Tensor Tensor::ones(const vector<int64_t>& shape, bool requires_grad) {
+    Tensor Tensor::ones(const std::vector<int64_t>& shape, bool requires_grad) {
         int64_t numel = numel_from_shape(shape);
-        return Tensor(vector<float>(numel, 1.0f), shape, requires_grad);
+        return Tensor(std::vector<float>(numel, 1.0f), shape, requires_grad);
     }
-    Tensor Tensor::rand(const vector<int64_t>& shape, bool requires_grad) {
+    Tensor Tensor::rand(const std::vector<int64_t>& shape, bool requires_grad) {
         int64_t numel = numel_from_shape(shape);
-        vector<float> data(numel);
+        std::vector<float> data(numel);
         for (auto& val : data) {
-            val = static_cast<float>(rand()) / RAND_MAX; // Random float in [0, 1)
+            val = static_cast<float>(std::rand()) / RAND_MAX; // Random float in [0, 1)
         }
-        return Tensor(move(data), shape, requires_grad);
+        return Tensor(std::move(data), shape, requires_grad);
     }
 
     // metadata
@@ -51,8 +49,8 @@ namespace tensednet {
         return numel_from_shape(shape);
     }
 
-    string Tensor::shape_str() const {
-        ostringstream ss;
+    std::string Tensor::shape_str() const {
+        std::ostringstream ss;
         ss << "(";
         for (size_t i = 0; i < shape.size(); ++i) {
             ss << shape[i];
@@ -64,18 +62,18 @@ namespace tensednet {
 
     Tensor Tensor::operator+(const Tensor& other) const {
         if (data.size() != other.data.size()) {
-            throw runtime_error("Shape mismatch for addition: " + shape_str() + " vs " + other.shape_str());
+            throw std::runtime_error("Shape mismatch for addition: " + shape_str() + " vs " + other.shape_str());
         }
-        vector<float> out_data(data.size());
+        std::vector<float> out_data(data.size());
         for (size_t i = 0; i < data.size(); ++i) {
             out_data[i] = data[i] + other.data[i];
         }
         bool rg = requires_grad || other.requires_grad;
-        Tensor out(move(out_data), shape, rg);
+        Tensor out(std::move(out_data), shape, rg);
         if (rg) {
-            auto self_ref = make_shared<Tensor>(*this);
-            auto other_ref = make_shared<Tensor>(other);
-            auto out_ref = make_shared<Tensor>(out);
+            auto self_ref = std::make_shared<Tensor>(*this);
+            auto other_ref = std::make_shared<Tensor>(other);
+            auto out_ref = std::make_shared<Tensor>(out);
 
             out_ref->backward_fn = [self_ref, other_ref, out_ref]() {
                 if (self_ref->requires_grad) {
