@@ -225,7 +225,75 @@ namespace tensednet {
         }
         return out;
     }
+    
+    // ----- relu -----
 
+    Tensor Tensor::relu() const {
+        Tensor out;
+        out.impl = make_impl(impl->shape, impl->requires_grad);
+        const float* a_p = data_ptr();
+        float* o_p = out.data_ptr();
+        int64_t n = numel();
+        for (int64_t i = 0; i < n; ++i) o_p[i] = std::max(0.0f, a_p[i]);
+     
+        if (out.impl->requires_grad) {
+            auto a = impl, o = out.impl;
+            o->parents = {a};
+            o->backward_fn = [a, o]() {
+                int64_t n = numel_of(o);
+                const float* og = o->grad_storage->ptr.get();
+                const float* ad = a->storage->ptr.get() + a->offset;
+                std::vector<float> contrib(n);
+                for (int64_t i = 0; i < n; ++i) contrib[i] = (ad[i] > 0.0f) ? og[i] : 0.0f;
+                accumulate_grad(a, contrib.data(), n);
+            };
+        }
+        return out;
+    }
+
+    // ----- mean n sum op -----
+
+    Tensor Tensor::sum() const {
+        const float* a_p = data_ptr();
+        int64_t n = numel();
+        float total = std::accumulate(a_p, a_p + n, 0.0f);
+     
+        Tensor out;
+        out.impl = make_impl({}, impl->requires_grad);
+        out.data_ptr()[0] = total;
+     
+        if (out.impl->requires_grad) {
+            auto a = impl, o = out.impl;
+            o->parents = {a};
+            o->backward_fn = [a, o]() {
+                float g = o->grad_storage->ptr.get()[0];
+                std::vector<float> contrib(numel_of(a), g); // d(sum)/da_i = 1
+                accumulate_grad(a, contrib.data(), (int64_t)contrib.size());
+            };
+        }
+        return out;
+    }
+
+    Tensor Tensor::mean() const {
+        int64_t n = numel();
+        const float* a_p = data_ptr();
+        float total = std::accumulate(a_p, a_p + n, 0.0f);
+     
+        Tensor out;
+        out.impl = make_impl({}, impl->requires_grad);
+        out.data_ptr()[0] = total / (float)n;
+     
+        if (out.impl->requires_grad) {
+            auto a = impl, o = out.impl;
+            o->parents = {a};
+            o->backward_fn = [a, o, n]() {
+                float g = o->grad_storage->ptr.get()[0];
+                std::vector<float> contrib(numel_of(a), g / (float)n); // d(mean)/da_i = 1/n
+                accumulate_grad(a, contrib.data(), (int64_t)contrib.size());
+            };
+        }
+        return out;
+    }
 
     // ----- backward / zero_grad impl -----
 
