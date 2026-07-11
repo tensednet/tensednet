@@ -106,6 +106,66 @@ namespace tensednet {
         return out;
     }
 
+    Tensor Tensor::operator-(const Tensor& other) const {
+        if (impl->data.size() != other.impl->data.size())
+            throw std::runtime_error("Shape mismatch for subtraction: " + shape_str() + " vs " + other.shape_str());
+     
+        std::vector<float> out_data(impl->data.size());
+        for (size_t i = 0; i < out_data.size(); ++i)
+            out_data[i] = impl->data[i] - other.impl->data[i];
+     
+        bool rg = impl->requires_grad || other.impl->requires_grad;
+        Tensor out(std::move(out_data), impl->shape, rg);
+     
+        if (rg) {
+            auto a = impl;
+            auto b = other.impl;
+            auto o = out.impl;
+            o->parents = {a, b};
+            o->backward_fn = [a, b, o]() {
+                if (a->requires_grad) accumulate_grad(a, o->grad);
+                if (b->requires_grad) {
+                    std::vector<float> neg_grad(o->grad.size());
+                    for (size_t i = 0; i < neg_grad.size(); ++i) neg_grad[i] = -o->grad[i];
+                    accumulate_grad(b, neg_grad);
+                }
+            };
+        }
+        return out;
+    }
+
+    Tensor Tensor::operator*(const Tensor& other) const {
+        if (impl->data.size() != other.impl->data.size())
+            throw std::runtime_error("Shape mismatch for multiplication: " + shape_str() + " vs " + other.shape_str());
+     
+        std::vector<float> out_data(impl->data.size());
+        for (size_t i = 0; i < out_data.size(); ++i)
+            out_data[i] = impl->data[i] * other.impl->data[i];
+     
+        bool rg = impl->requires_grad || other.impl->requires_grad;
+        Tensor out(std::move(out_data), impl->shape, rg);
+     
+        if (rg) {
+            auto a = impl;
+            auto b = other.impl;
+            auto o = out.impl;
+            o->parents = {a, b};
+            o->backward_fn = [a, b, o]() {
+                if (a->requires_grad) {
+                    std::vector<float> grad_a(o->grad.size());
+                    for (size_t i = 0; i < grad_a.size(); ++i) grad_a[i] = o->grad[i] * b->data[i];
+                    accumulate_grad(a, grad_a);
+                }
+                if (b->requires_grad) {
+                    std::vector<float> grad_b(o->grad.size());
+                    for (size_t i = 0; i < grad_b.size(); ++i) grad_b[i] = o->grad[i] * a->data[i];
+                    accumulate_grad(b, grad_b);
+                }
+            };
+        }
+        return out;
+    }
+
 
     // ----- backward / zero_grad impl -----
 
