@@ -4,25 +4,36 @@
 #include <cstdlib>
 #include <numeric>
 #include <sstream>
+#include <algorithm>
 #include <unordered_set>
 #include <functional>
 
 namespace tensednet {
     
     static int64_t numel_from_shape(const std::vector<int64_t>& shape) {
-        if (shape.empty()) return 1; // scalar
         int64_t n = 1;
-        for (auto dim : shape) {
-            if (dim <= 0) throw std::invalid_argument("Shape dimensions must be positive.");
-            n *= dim;
+        for (auto d : shape) {
+            if (d <= 0) throw std::invalid_argument("Shape dimensions must be positive.");
+            n *= d;
         }
         return n;
     }
 
     // ----- constructor -----
 
-    Tensor::Tensor() : impl(std::make_shared<TensorImpl>()) {}
+    static std::shared_ptr<TensorImpl> make_impl(std::vector<int64_t> shape, bool requires_grad) {
+        auto impl = std::make_shared<TensorImpl>();
+        int64_t n = numel_from_shape(shape);
+        impl->storage = std::make_shared<Storage>(n);
+        impl->offset = 0;
+        impl->shape = std::move(shape);
+        impl->strides = contiguous_strides(impl->shape);
+        impl->requires_grad = requires_grad;
+        return impl;
+    }
     
+    Tensor::Tensor() : impl(std::make_shared<TensorImpl>()) {}
+     
     Tensor::Tensor(std::vector<float> data, std::vector<int64_t> shape, bool requires_grad) {
         int64_t expected = numel_from_shape(shape);
         if ((int64_t)data.size() != expected) {
@@ -30,28 +41,71 @@ namespace tensednet {
                 "Data size does not match shape. Expected " + std::to_string(expected) +
                 " elements, got " + std::to_string(data.size()));
         }
-        impl = std::make_shared<TensorImpl>(std::move(data), std::move(shape), requires_grad);
+        impl = make_impl(shape, requires_grad);
+        std::copy(data.begin(), data.end(), impl->storage->ptr.get());
     }
      
     Tensor Tensor::zeros(const std::vector<int64_t>& shape, bool requires_grad) {
-        int64_t n = numel_from_shape(shape);
-        return Tensor(std::vector<float>(n, 0.0f), shape, requires_grad);
+        // make_impl alr init with zeros
+        Tensor t;
+        t.impl = make_impl(shape, requires_grad);
+        return t;
     }
      
     Tensor Tensor::ones(const std::vector<int64_t>& shape, bool requires_grad) {
-        int64_t n = numel_from_shape(shape);
-        return Tensor(std::vector<float>(n, 1.0f), shape, requires_grad);
+        Tensor t;
+        t.impl = make_impl(shape, requires_grad);
+        std::fill(t.data_ptr(), t.data_ptr() + t.numel(), 1.0f);
+        return t;
     }
      
     Tensor Tensor::rand(const std::vector<int64_t>& shape, bool requires_grad) {
-        int64_t n = numel_from_shape(shape);
-        std::vector<float> data(n);
-        for (auto& v : data) v = static_cast<float>(std::rand()) / static_cast<float>(RAND_MAX);
-        return Tensor(std::move(data), shape, requires_grad);
+        Tensor t;
+        t.impl = make_impl(shape, requires_grad);
+        float* p = t.data_ptr();
+        for (int64_t i = 0; i < t.numel(); ++i)
+            p[i] = static_cast<float>(std::rand()) / static_cast<float>(RAND_MAX);
+        return t;
     }
      
     Tensor Tensor::from_scalar(float value, bool requires_grad) {
-        return Tensor(std::vector<float>{value}, std::vector<int64_t>{}, requires_grad);
+        Tensor t;
+        t.impl = make_impl({}, requires_grad);
+        t.data_ptr()[0] = value;
+        return t;
+    }
+
+    Tensor Tensor::from_blob(float* raw, std::vector<int64_t> shape,
+                              std::function<void(float*)> deleter, bool requires_grad) {
+        Tensor t;
+        t.impl = std::make_shared<TensorImpl>();
+        int64_t n = numel_from_shape(shape);
+        t.impl->storage = std::make_shared<Storage>(raw, n, std::move(deleter));
+        t.impl->offset = 0;
+        t.impl->shape = std::move(shape);
+        t.impl->strides = contiguous_strides(t.impl->shape);
+        t.impl->requires_grad = requires_grad;
+        return t;
+    }
+
+    // ----- element access -----
+     
+    float* Tensor::grad_ptr() {
+        if (!impl->grad_storage) {
+            impl->grad_storage = std::make_shared<Storage>(numel());
+        }
+        return impl->grad_storage->ptr.get();
+    }
+     
+    std::vector<float> Tensor::data() const {
+        const float* p = data_ptr();
+        return std::vector<float>(p, p + numel());
+    }
+     
+    std::vector<float> Tensor::grad() const {
+        if (!impl->grad_storage) return std::vector<float>(numel(), 0.0f);
+        float* p = impl->grad_storage->ptr.get();
+        return std::vector<float>(p, p + numel());
     }
 
     // ----- metadata -----
@@ -73,61 +127,64 @@ namespace tensednet {
 
     // ----- help ahh funcs -----
 
-    static void accumulate_grad(const std::shared_ptr<TensorImpl>& node, const std::vector<float>& contrib) {
-        if (node->grad.size() != node->data.size())
-            node->grad.assign(node->data.size(), 0.0f);
-        for (size_t i = 0; i < contrib.size(); ++i)
-            node->grad[i] += contrib[i];
+    static void accumulate_grad(const std::shared_ptr<TensorImpl>& node, const float* contrib, int64_t count) {
+        if (!node->grad_storage) node->grad_storage = std::make_shared<Storage>(count);
+        float* g = node->grad_storage->ptr.get();
+        for (int64_t i = 0; i < count; ++i) g[i] += contrib[i];
     }
+     
+    static int64_t numel_of(const std::shared_ptr<TensorImpl>& t) { return numel_from_shape(t->shape); }
 
     // ----- eleement-wsie operations -----
 
     Tensor Tensor::operator+(const Tensor& other) const {
-        if (impl->data.size() != other.impl->data.size())
+        if (numel() != other.numel())
             throw std::runtime_error("Shape mismatch for addition: " + shape_str() + " vs " + other.shape_str());
      
-        std::vector<float> out_data(impl->data.size());
-        for (size_t i = 0; i < out_data.size(); ++i)
-            out_data[i] = impl->data[i] + other.impl->data[i];
+        Tensor out;
+        out.impl = make_impl(impl->shape, impl->requires_grad || other.impl->requires_grad);
+        const float* a_p = data_ptr();
+        const float* b_p = other.data_ptr();
+        float* o_p = out.data_ptr();
+        int64_t n = numel();
+        for (int64_t i = 0; i < n; ++i) o_p[i] = a_p[i] + b_p[i];
      
-        bool rg = impl->requires_grad || other.impl->requires_grad;
-        Tensor out(std::move(out_data), impl->shape, rg);
-     
-        if (rg) {
-            auto a = impl;
-            auto b = other.impl;
-            auto o = out.impl;
+        if (out.impl->requires_grad) {
+            auto a = impl, b = other.impl, o = out.impl;
             o->parents = {a, b};
             o->backward_fn = [a, b, o]() {
-                if (a->requires_grad) accumulate_grad(a, o->grad);
-                if (b->requires_grad) accumulate_grad(b, o->grad);
+                int64_t n = numel_of(o);
+                const float* og = o->grad_storage->ptr.get();
+                if (a->requires_grad) accumulate_grad(a, og, n); // d(a+b)/da = 1
+                if (b->requires_grad) accumulate_grad(b, og, n); // d(a+b)/db = 1
             };
         }
         return out;
     }
 
     Tensor Tensor::operator-(const Tensor& other) const {
-        if (impl->data.size() != other.impl->data.size())
+        if (numel() != other.numel())
             throw std::runtime_error("Shape mismatch for subtraction: " + shape_str() + " vs " + other.shape_str());
      
-        std::vector<float> out_data(impl->data.size());
-        for (size_t i = 0; i < out_data.size(); ++i)
-            out_data[i] = impl->data[i] - other.impl->data[i];
+        Tensor out;
+        out.impl = make_impl(impl->shape, impl->requires_grad || other.impl->requires_grad);
+        const float* a_p = data_ptr();
+        const float* b_p = other.data_ptr();
+        float* o_p = out.data_ptr();
+        int64_t n = numel();
+        for (int64_t i = 0; i < n; ++i) o_p[i] = a_p[i] - b_p[i];
      
-        bool rg = impl->requires_grad || other.impl->requires_grad;
-        Tensor out(std::move(out_data), impl->shape, rg);
-     
-        if (rg) {
-            auto a = impl;
-            auto b = other.impl;
-            auto o = out.impl;
+        if (out.impl->requires_grad) {
+            auto a = impl, b = other.impl, o = out.impl;
             o->parents = {a, b};
             o->backward_fn = [a, b, o]() {
-                if (a->requires_grad) accumulate_grad(a, o->grad);
+                int64_t n = numel_of(o);
+                const float* og = o->grad_storage->ptr.get();
+                if (a->requires_grad) accumulate_grad(a, og, n); // d(a-b)/da = 1
                 if (b->requires_grad) {
-                    std::vector<float> neg_grad(o->grad.size());
-                    for (size_t i = 0; i < neg_grad.size(); ++i) neg_grad[i] = -o->grad[i];
-                    accumulate_grad(b, neg_grad);
+                    std::vector<float> neg(n);
+                    for (int64_t i = 0; i < n; ++i) neg[i] = -og[i];
+                    accumulate_grad(b, neg.data(), n); // d(a-b)/db = -1
                 }
             };
         }
@@ -135,31 +192,34 @@ namespace tensednet {
     }
 
     Tensor Tensor::operator*(const Tensor& other) const {
-        if (impl->data.size() != other.impl->data.size())
+        if (numel() != other.numel())
             throw std::runtime_error("Shape mismatch for multiplication: " + shape_str() + " vs " + other.shape_str());
      
-        std::vector<float> out_data(impl->data.size());
-        for (size_t i = 0; i < out_data.size(); ++i)
-            out_data[i] = impl->data[i] * other.impl->data[i];
+        Tensor out;
+        out.impl = make_impl(impl->shape, impl->requires_grad || other.impl->requires_grad);
+        const float* a_p = data_ptr();
+        const float* b_p = other.data_ptr();
+        float* o_p = out.data_ptr();
+        int64_t n = numel();
+        for (int64_t i = 0; i < n; ++i) o_p[i] = a_p[i] * b_p[i];
      
-        bool rg = impl->requires_grad || other.impl->requires_grad;
-        Tensor out(std::move(out_data), impl->shape, rg);
-     
-        if (rg) {
-            auto a = impl;
-            auto b = other.impl;
-            auto o = out.impl;
+        if (out.impl->requires_grad) {
+            auto a = impl, b = other.impl, o = out.impl;
             o->parents = {a, b};
             o->backward_fn = [a, b, o]() {
+                int64_t n = numel_of(o);
+                const float* og = o->grad_storage->ptr.get();
+                const float* ad = a->storage->ptr.get() + a->offset;
+                const float* bd = b->storage->ptr.get() + b->offset;
                 if (a->requires_grad) {
-                    std::vector<float> grad_a(o->grad.size());
-                    for (size_t i = 0; i < grad_a.size(); ++i) grad_a[i] = o->grad[i] * b->data[i];
-                    accumulate_grad(a, grad_a);
+                    std::vector<float> contrib(n);
+                    for (int64_t i = 0; i < n; ++i) contrib[i] = og[i] * bd[i]; // d(ab)/da = b
+                    accumulate_grad(a, contrib.data(), n);
                 }
                 if (b->requires_grad) {
-                    std::vector<float> grad_b(o->grad.size());
-                    for (size_t i = 0; i < grad_b.size(); ++i) grad_b[i] = o->grad[i] * a->data[i];
-                    accumulate_grad(b, grad_b);
+                    std::vector<float> contrib(n);
+                    for (int64_t i = 0; i < n; ++i) contrib[i] = og[i] * ad[i]; // d(ab)/db = a
+                    accumulate_grad(b, contrib.data(), n);
                 }
             };
         }
@@ -187,7 +247,8 @@ namespace tensednet {
      
         // start this tensor's grad with 1s (dL/dL = 1)
         // assumes backward() is called on the final scalar loss
-        impl->grad.assign(impl->data.size(), 1.0f);
+        impl->grad_storage = std::make_shared<Storage>(numel());
+        std::fill(impl->grad_storage->ptr.get(), impl->grad_storage->ptr.get() + numel(), 1.0f);
      
         for (auto it = topo.rbegin(); it != topo.rend(); ++it) {
             if ((*it)->backward_fn) (*it)->backward_fn();
@@ -195,6 +256,6 @@ namespace tensednet {
     }
      
     void Tensor::zero_grad() {
-        impl->grad.clear();
+        impl->grad_storage.reset();
     }
 }
