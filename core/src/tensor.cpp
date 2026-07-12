@@ -225,6 +225,25 @@ namespace tensednet {
         }
         return out;
     }
+
+    // ---- matrix multiplication -----
+
+
+    static std::vector<int64_t> pad_left(const std::vector<int64_t>& shape, size_t rank) {}
+
+    static std::vector<int64_t> broadcast_shapes(const std::vector<int64_t>& a, const std::vector<int64_t>& b) {}
+
+    static std::vector<int64_t> broadcast_batch_strides(const std::vector<int64_t>& small_shape, const std::vector<int64_t>& out_shape) {}
+
+    static void matmul_2d(const float* A, const float* B, float* O, int64_t M, int64_t K, int64_t N) {
+        std::fill(O, O + M * N, 0.0f);
+        for (int64_t i = 0; i < M; ++i)
+            for (int64_t k = 0; k < K; ++k) {
+                float a_ik = A[i * K + k];
+                for (int64_t j = 0; j < N; ++j)
+                    O[i * N + j] += a_ik * B[k * N + j];
+            }
+    }
     
     // ----- relu -----
 
